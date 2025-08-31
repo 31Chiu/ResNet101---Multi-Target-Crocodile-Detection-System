@@ -11,7 +11,8 @@ import logging
 
 # Configure logging to save progress and output to the console
 logging.basicConfig(
-    level='%(asctime)s - %(levelname)s - %(message)s',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('training_resnet101.log', encoding='utf-8'),
         logging.StreamHandler()
