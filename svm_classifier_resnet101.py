@@ -87,7 +87,7 @@ class SVMHybridTrainer:
         model.fc = nn.Sequential(
             # Even if it is not used in evaluation, it is structurally required to 
             # match the weights
-            nn.Sequential(0.5),
+            nn.Dropout(0.5),
             nn.Linear(num_ftrs,len(checkpoint['classes']))
         )
         model.load_state_dict(checkpoint['model_state_dict'])
@@ -124,43 +124,43 @@ class SVMHybridTrainer:
             # Concatenate the features and labels from all batches into single arrays
             return np.concatenate(features_list), np.concatenate(labels_list)
         
-        # Train and evaluate SVM
-        def train_and_evaluate_svm(self):
-            # This function orchestrates the entire workflow: extract features, train
-            # SVM, and evaluate its performance
-            # It extracts features and then train and tests the SVM
-            # Step 1: Extract features for all our data
-            logging.info("Starting Step 1: Start extracting features of the training and validation sets...")
-            train_features, train_labels = self._extract_features(self.train_loader)
-            val_features, val_labels = self._extract_features(self.val_loader)
-            logging.info(f'Extraction completed. Number of training set features: {len(train_features)}')
-            logging.info(f'Extraction completed. Number of validation set features: {len(val_features)}')
+    # Train and evaluate SVM
+    def train_and_evaluate_svm(self):
+        # This function orchestrates the entire workflow: extract features, train
+        # SVM, and evaluate its performance
+        # It extracts features and then train and tests the SVM
+        # Step 1: Extract features for all our data
+        logging.info("Starting Step 1: Start extracting features of the training and validation sets...")
+        train_features, train_labels = self._extract_features(self.train_loader)
+        val_features, val_labels = self._extract_features(self.val_loader)
+        logging.info(f'Extraction completed. Number of training set features: {len(train_features)}')
+        logging.info(f'Extraction completed. Number of validation set features: {len(val_features)}')
 
-            # Step 2: Train the SVM brain or classifier
-            logging.info("Starting Step 2: Training the SVM brain or classifier...")
-            # We create an SVM classifier. C = 1.0 is a good default for the regularization parameter
-            # The 'kernel' cam be 'linear' or 'rbf' (more flexible). We assumne that the features from 
-            # the deep learning model are linearly separable
-            # We use a linear kernel function, which is usually a good starting point for deep learning 
-            # based features
-            svm_classifier = SVC(kernel='linear', C=1.0, random_state=42)
+        # Step 2: Train the SVM brain or classifier
+        logging.info("Starting Step 2: Training the SVM brain or classifier...")
+        # We create an SVM classifier. C = 1.0 is a good default for the regularization parameter
+        # The 'kernel' cam be 'linear' or 'rbf' (more flexible). We assumne that the features from 
+        # the deep learning model are linearly separable
+        # We use a linear kernel function, which is usually a good starting point for deep learning 
+        # based features
+        svm_classifier = SVC(kernel='linear', C=1.0, random_state=42)
 
-            # The .fit() method is the training process for the SVM
-            svm_classifier.fit(train_features, train_labels)
-            logging.info("SVM training completed.")
+        # The .fit() method is the training process for the SVM
+        svm_classifier.fit(train_features, train_labels)
+        logging.info("SVM training completed.")
 
-            # Step 3: Evaluate the new SVM classifier
-            logging.info("Starting Step 3: Evaluating the new SVM classifier on validation data...")
-            # Use the trained SVM to make predictions on the validation features
-            val_predictions = svm_classifier.predict(val_features)
-            # Calculate the accuracy
-            accuracy = accuracy_score(val_labels, val_predictions)
+        # Step 3: Evaluate the new SVM classifier
+        logging.info("Starting Step 3: Evaluating the new SVM classifier on validation data...")
+        # Use the trained SVM to make predictions on the validation features
+        val_predictions = svm_classifier.predict(val_features)
+        # Calculate the accuracy
+        accuracy = accuracy_score(val_labels, val_predictions)
 
-            print("\n" + "="*50)
-            logging.info(f'ResNet101 + SVM Hybrid Model Validation Accuracy: {accuracy:.4f}')
-            print("="*50 + "\n")
+        print("\n" + "="*50)
+        logging.info(f'ResNet101 + SVM Hybrid Model Validation Accuracy: {accuracy:.4f}')
+        print("="*50 + "\n")
 
-            return accuracy
+        return accuracy
         
 def main():
     base_dir = os.path.dirname(os.path.abspath(__file__))
