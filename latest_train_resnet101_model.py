@@ -22,38 +22,41 @@ logging.basicConfig(
 )
 
 class ResNet101Trainer:
-    def __init__(self, train_dir, val_dir, num_epochs=50, batch_size=32, learning_rate=0.001):
+    def __init__(self, train_dir, val_dir, num_epochs=50, learning_rate=0.001):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         if torch.cuda.is_available():
             torch.cuda.set_device(0)
             torch.cuda.empty_cache()
 
         self.num_epochs = num_epochs
-        self.batch_size = batch_size
         self.learning_rate = learning_rate
+        
+        # 🌟 核心策略：物理批次降级 + 梯度累加，完美模拟 batch_size=32
+        self.physical_batch_size = 8   
+        self.accumulation_steps = 4    
+
         self.train_dir = train_dir
         self.val_dir = val_dir
 
         self.train_transform, self.val_transform = self._build_transforms()
-        self.train_loader, self.val_loader, self.num_classes = self._load_data()
+
+        # 🌟 核心策略：重新开启 4 个并发线程和内存钉扎高速通道 🏎️
+        train_dataset = datasets.ImageFolder(root=self.train_dir, transform=self.train_transform)
+        self.train_loader = torch.utils.data.DataLoader(
+            train_dataset, batch_size=self.physical_batch_size, shuffle=True, 
+            num_workers=4, pin_memory=True
+        )
+
+        val_dataset = datasets.ImageFolder(root=self.val_dir, transform=self.val_transform)
+        self.val_loader = torch.utils.data.DataLoader(
+            val_dataset, batch_size=self.physical_batch_size, shuffle=False, 
+            num_workers=4, pin_memory=True
+        )
+
         self.model = self._build_model()
-
         self.criterion = nn.CrossEntropyLoss()
-        self.optimizer = optim.SGD(
-            self.model.parameters(),
-            lr=self.learning_rate,
-            momentum=0.9,
-            weight_decay=1e-4
-        )
-
-        # Install a safety line to prevent shutdown and adjust the patience value
-        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer,
-            mode='max',
-            factor=0.1,
-            patience=7,
-            min_lr=1e-6
-        )
+        self.optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
+        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='max', factor=0.1, patience=3, verbose=True)
 
         self.best_acc = 0.0
 
@@ -61,9 +64,9 @@ class ResNet101Trainer:
         mean = [0.485, 0.456, 0.406]
         std = [0.229, 0.224, 0.225]
 
-        # The most stringent data enhancement remedy
+        # 🌟 核心策略：同步 640x640 全景视野
         train_transform = transforms.Compose([
-            transforms.RandomResizedCrop(224),
+            transforms.RandomResizedCrop(640), 
             transforms.RandomHorizontalFlip(),
             transforms.RandomRotation(30), 
             transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1), shear=10),
@@ -74,160 +77,126 @@ class ResNet101Trainer:
         ])
 
         val_transform = transforms.Compose([
-            transforms.Resize(256),
-            transforms.CenterCrop(224),
+            transforms.Resize(680),            
+            transforms.CenterCrop(640),        
             transforms.ToTensor(),
             transforms.Normalize(mean, std)
         ])
-
         return train_transform, val_transform
-    
-    def _load_data(self):
-        train_dataset = datasets.ImageFolder(root=self.train_dir, transform=self.train_transform)
-        val_dataset = datasets.ImageFolder(root=self.val_dir, transform=self.val_transform)
 
-        train_loader = torch.utils.data.DataLoader(
-            train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=4, pin_memory=True
-        )
-        val_loader = torch.utils.data.DataLoader(
-            val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=4, pin_memory=True
-        )
-
-        logging.info(f'Number of classes: {len(train_dataset.classes)}')
-        logging.info(f'Class names: {train_dataset.classes}')
-        
-        # 记录鳄鱼的索引，用于计算 TP, FP, FN
-        self.crocodile_idx = train_dataset.classes.index('crocodile')
-
-        return train_loader, val_loader, len(train_dataset.classes)
-    
     def _build_model(self):
-        model = resnet101(weights=ResNet101_Weights.IMAGENET1K_V2)
-        num_features = model.fc.in_features
+        # 加载 ResNet101
+        model = resnet101(weights=ResNet101_Weights.DEFAULT)
+        num_ftrs = model.fc.in_features
         model.fc = nn.Sequential(
             nn.Dropout(0.5),
-            nn.Linear(num_features, self.num_classes)
+            nn.Linear(num_ftrs, 2)
         )
-        model = model.to(self.device)
-        return model
-    
+        return model.to(self.device)
+
     def train_epoch(self):
         self.model.train()
         running_loss = 0.0
-        running_corrects = 0
+        correct = 0
         total = 0
-
-        running_tp = 0
-        running_fp = 0
-        running_fn = 0
         all_labels = []
-        all_probs = []
+        all_preds = []
 
-        for inputs, labels in self.train_loader:
-            inputs, labels = inputs.to(self.device), labels.to(self.device)
-            self.optimizer.zero_grad()
+        self.optimizer.zero_grad()
 
-            outputs = self.model(inputs)
+        for i, (images, labels) in enumerate(self.train_loader):
+            images, labels = images.to(self.device), labels.to(self.device)
+
+            outputs = self.model(images)
             loss = self.criterion(outputs, labels)
 
+            # 🌟 梯度累加的数学缩放
+            loss = loss / self.accumulation_steps
             loss.backward()
-            self.optimizer.step()
 
-            _, preds = torch.max(outputs, 1)
-            running_loss += loss.item() * inputs.size(0)
-            running_corrects += torch.sum(preds == labels.data)
+            # 🌟 达到指定步数或 Epoch 尾部时执行真实更新
+            if (i + 1) % self.accumulation_steps == 0 or (i + 1) == len(self.train_loader):
+                self.optimizer.step()
+                self.optimizer.zero_grad()
+
+            running_loss += (loss.item() * self.accumulation_steps) * images.size(0)
+            _, predicted = torch.max(outputs.data, 1)
             total += labels.size(0)
+            correct += (predicted == labels).sum().item()
 
-            # Unified statistical indicators
-            running_tp += torch.sum((preds == self.crocodile_idx) & (labels.data == self.crocodile_idx)).item()
-            running_fp += torch.sum((preds == self.crocodile_idx) & (labels.data != self.crocodile_idx)).item()
-            running_fn += torch.sum((preds != self.crocodile_idx) & (labels.data == self.crocodile_idx)).item()
-
-            probs = torch.softmax(outputs, dim=1)
-            binary_labels = (labels.data == self.crocodile_idx).cpu().numpy()
-            croc_probs = probs[:, self.crocodile_idx].detach().cpu().numpy()
-            all_labels.extend(binary_labels)
-            all_probs.extend(croc_probs)
+            all_labels.extend(labels.cpu().numpy())
+            probs = torch.nn.functional.softmax(outputs, dim=1)
+            all_preds.extend(probs[:, 1].detach().cpu().numpy())
 
         epoch_loss = running_loss / total
-        epoch_acc = running_corrects.double() / total
+        epoch_acc = correct / total
         
-        precision = running_tp / (running_tp + running_fp) if (running_tp + running_fp) > 0 else 0.0
-        recall = running_tp / (running_tp + running_fn) if (running_tp + running_fn) > 0 else 0.0
-        epoch_map = average_precision_score(all_labels, all_probs) if len(set(all_labels)) > 1 else 0.0
+        preds_binary = (np.array(all_preds) > 0.5).astype(int)
         
-        return epoch_loss, epoch_acc.item(), precision, recall, epoch_map
-    
+        from sklearn.metrics import precision_score, recall_score
+        epoch_prec = precision_score(all_labels, preds_binary, average='macro', zero_division=0)
+        epoch_rec = recall_score(all_labels, preds_binary, average='macro', zero_division=0)
+        epoch_map = average_precision_score(all_labels, all_preds)
+
+        return epoch_loss, epoch_acc, epoch_prec, epoch_rec, epoch_map
+
     def validate(self):
         self.model.eval()
         running_loss = 0.0
-        running_corrects = 0
+        correct = 0
         total = 0
-
-        running_tp = 0
-        running_fp = 0
-        running_fn = 0
         all_labels = []
-        all_probs = []
+        all_preds = []
 
         with torch.no_grad():
-            for inputs, labels in self.val_loader:
-                inputs, labels = inputs.to(self.device), labels.to(self.device)
-
-                outputs = self.model(inputs)
+            for images, labels in self.val_loader:
+                images, labels = images.to(self.device), labels.to(self.device)
+                outputs = self.model(images)
                 loss = self.criterion(outputs, labels)
 
-                _, preds = torch.max(outputs, 1)
-                running_loss += loss.item() * inputs.size(0)
-                running_corrects += torch.sum(preds == labels.data)
+                running_loss += loss.item() * images.size(0)
+                _, predicted = torch.max(outputs.data, 1)
                 total += labels.size(0)
+                correct += (predicted == labels).sum().item()
 
-                running_tp += torch.sum((preds == self.crocodile_idx) & (labels.data == self.crocodile_idx)).item()
-                running_fp += torch.sum((preds == self.crocodile_idx) & (labels.data != self.crocodile_idx)).item()
-                running_fn += torch.sum((preds != self.crocodile_idx) & (labels.data == self.crocodile_idx)).item()
+                all_labels.extend(labels.cpu().numpy())
+                probs = torch.nn.functional.softmax(outputs, dim=1)
+                all_preds.extend(probs[:, 1].cpu().numpy())
 
-                probs = torch.softmax(outputs, dim=1)
-                binary_labels = (labels.data == self.crocodile_idx).cpu().numpy()
-                croc_probs = probs[:, self.crocodile_idx].cpu().numpy()
-                all_labels.extend(binary_labels)
-                all_probs.extend(croc_probs)
-
-            epoch_loss = running_loss / total
-            epoch_acc = running_corrects.double() / total
-            
-            precision = running_tp / (running_tp + running_fp) if (running_tp + running_fp) > 0 else 0.0
-            recall = running_tp / (running_tp + running_fn) if (running_tp + running_fn) > 0 else 0.0
-            epoch_map = average_precision_score(all_labels, all_probs) if len(set(all_labels)) > 1 else 0.0
-            
-            return epoch_loss, epoch_acc.item(), precision, recall, epoch_map
+        epoch_loss = running_loss / total
+        epoch_acc = correct / total
         
-    def save_checkpoint(self, epoch, acc):
-        checkpoint_dir = 'resnet101_checkpoint'
-        os.makedirs(checkpoint_dir, exist_ok=True)
+        preds_binary = (np.array(all_preds) > 0.5).astype(int)
+        
+        from sklearn.metrics import precision_score, recall_score
+        epoch_prec = precision_score(all_labels, preds_binary, average='macro', zero_division=0)
+        epoch_rec = recall_score(all_labels, preds_binary, average='macro', zero_division=0)
+        epoch_map = average_precision_score(all_labels, all_preds)
 
-        checkpoint = {
-            'epoch' : epoch,
-            'model_state_dict' : self.model.state_dict(),
-            'optimizer_state_dict' : self.optimizer.state_dict(),
-            'scheduler_state_dict' : self.scheduler.state_dict(),
-            'accuracy' : acc,
-            'classes' : self.train_loader.dataset.classes
-        }
+        return epoch_loss, epoch_acc, epoch_prec, epoch_rec, epoch_map
 
-        if acc > self.best_acc:
-            self.best_acc = acc
-            best_path = os.path.join(checkpoint_dir, 'best_resnet101_model.pth')
-            torch.save(checkpoint, best_path)
-            logging.info(f'Best model updated and saved: {best_path}')
+    def save_checkpoint(self, epoch, val_acc):
+        if val_acc > self.best_acc:
+            self.best_acc = val_acc
+            checkpoint_dir = 'resnet101_checkpoint'
+            os.makedirs(checkpoint_dir, exist_ok=True)
+            checkpoint_path = os.path.join(checkpoint_dir, 'best_resnet101_model.pth')
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': self.model.state_dict(),
+                'optimizer_state_dict': self.optimizer.state_dict(),
+                'accuracy': val_acc
+            }, checkpoint_path)
+            logging.info(f'Best model updated and saved: {checkpoint_path}')
 
-    def train(self):
+    def run(self):
         logging.info(f'Starting training on device: {self.device}')
 
         for epoch in range(1, self.num_epochs + 1):
             train_loss, train_acc, train_prec, train_rec, train_map = self.train_epoch()
             val_loss, val_acc, val_prec, val_rec, val_map = self.validate()
-            self.scheduler.step(val_acc)
             
+            self.scheduler.step(val_acc)
             current_lr = self.optimizer.param_groups[0]['lr']
 
             logging.info(
@@ -235,7 +204,6 @@ class ResNet101Trainer:
                 f'Train -> Loss: {train_loss:.4f} Acc: {train_acc:.4f} Prec: {train_prec:.4f} Rec: {train_rec:.4f} mAP: {train_map:.4f} | '
                 f'Val -> Loss: {val_loss:.4f} Acc: {val_acc:.4f} Prec: {val_prec:.4f} Rec: {val_rec:.4f} mAP: {val_map:.4f}'
             )
-
             self.save_checkpoint(epoch, val_acc)
 
         logging.info(f'Training complete. Best validation accuracy: {self.best_acc: .4f}')
@@ -250,14 +218,8 @@ def main():
     train_dir = os.path.join(base_dir, './dataset/Training')
     val_dir = os.path.join(base_dir, './dataset/Validation')
 
-    trainer = ResNet101Trainer(
-        train_dir=train_dir,
-        val_dir=val_dir,
-        num_epochs=50,
-        batch_size=32,
-        learning_rate=0.001
-    )
-    trainer.train()
+    trainer = ResNet101Trainer(train_dir=train_dir, val_dir=val_dir, num_epochs=50)
+    trainer.run()
 
 if __name__ == '__main__':
     main()

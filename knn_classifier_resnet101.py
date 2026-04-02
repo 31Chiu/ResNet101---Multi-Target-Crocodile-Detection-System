@@ -42,7 +42,8 @@ def load_pretrained_resnet101(model_path):
     
     # Load the entire saved file (checkpoint), which is a dictionary containing various pieces of data.
     checkpoint = torch.load(model_path, map_location=device)
-    num_classes = len(checkpoint['classes'])
+    # num_classes = len(checkpoint['classes'])
+    num_classes = 2
     logging.info(f'Model was trained on {num_classes} classes.')
 
     # Load the ResNet101 model structure. We specify weights=None because we are loading our own trained weights.
@@ -118,8 +119,10 @@ def main():
     # 2. Prepare the dataset
     # Define the same transformations used during the model's validation phase to ensure consistency.
     transform = transforms.Compose([
-        transforms.Resize(256),
-        transforms.CenterCrop(224),
+        # transforms.Resize(256),
+        # transforms.CenterCrop(224),
+        transforms.Resize(680),
+        transforms.CenterCrop(640),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
@@ -132,8 +135,10 @@ def main():
 
     # Create DataLoaders
     # shuffle=False is fine here as the order doesn't matter for feature extraction.
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=False, num_workers=4, pin_memory=True)
-    test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False, num_workers=4, pin_memory=True)
+    # train_loader = DataLoader(train_dataset, batch_size=32, shuffle=False, num_workers=4, pin_memory=True)
+    # test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False, num_workers=4, pin_memory=True)
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=False, num_workers=2, pin_memory=False)
+    test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False, num_workers=2, pin_memory=False)
 
     # 3. Extract features from both training and validation sets
     logging.info("Extracting features from the training set...")

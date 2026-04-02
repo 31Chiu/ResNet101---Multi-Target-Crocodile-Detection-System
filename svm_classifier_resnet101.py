@@ -37,8 +37,10 @@ class SVMHybridTrainer:
         # for the validation set during the ResNet101 model training
         mean, std = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
         transform = transforms.Compose([
-            transforms.Resize(256),
-            transforms.CenterCrop(224),
+            # transforms.Resize(256),
+            # transforms.CenterCrop(224),
+            transforms.Resize(680),
+            transforms.CenterCrop(640),
             transforms.ToTensor(),
             transforms.Normalize(mean, std)
         ])
@@ -88,7 +90,8 @@ class SVMHybridTrainer:
             # Even if it is not used in evaluation, it is structurally required to 
             # match the weights
             nn.Dropout(0.5),
-            nn.Linear(num_ftrs,len(checkpoint['classes']))
+            # nn.Linear(num_ftrs,len(checkpoint['classes']))
+            nn.Linear(num_ftrs, 2)
         )
         model.load_state_dict(checkpoint['model_state_dict'])
 
